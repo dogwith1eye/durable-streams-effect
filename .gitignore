@@ -1,0 +1,9 @@
+*.tsbuildinfo
+node_modules/
+.DS_Store
+.direnv/
+.idea/
+.env*
+.lalph/
+.repos/
+benchmark-results.json
