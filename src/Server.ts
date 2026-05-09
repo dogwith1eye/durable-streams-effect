@@ -797,6 +797,54 @@ const handleDelete = (
   })
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Registry helpers
+// ---------------------------------------------------------------------------
+
+const REGISTRY_PATH = `/v1/stream/__registry__`
+const SYSTEM_STREAMS = new Set([`__registry__`, `__presence__`])
+
+function bareStreamName(path: string): string {
+  return path.replace(/^\/v1\/stream\//, ``)
+}
+
+const enc = new TextEncoder()
+
+const ensureRegistry = Effect.gen(function* () {
+  const store = yield* Store
+  const exists = yield* store.has(REGISTRY_PATH)
+  if (!exists) yield* store.create(REGISTRY_PATH, { contentType: `application/json` })
+})
+
+const writeRegistryInsert = (path: string, contentType: string, createdAt: number) =>
+  Effect.gen(function* () {
+    yield* ensureRegistry
+    const store = yield* Store
+    const key = bareStreamName(path)
+    const event = JSON.stringify({
+      type: `stream`,
+      key,
+      value: { path: key, contentType, createdAt },
+      headers: { operation: `insert` },
+    })
+    yield* store.append(REGISTRY_PATH, enc.encode(event), {})
+  }).pipe(Effect.orElse(() => Effect.void))
+
+const writeRegistryDelete = (path: string) =>
+  Effect.gen(function* () {
+    const store = yield* Store
+    const exists = yield* store.has(REGISTRY_PATH)
+    if (!exists) return
+    const key = bareStreamName(path)
+    const event = JSON.stringify({
+      type: `stream`,
+      key,
+      headers: { operation: `delete` },
+    })
+    yield* store.append(REGISTRY_PATH, enc.encode(event), {})
+  }).pipe(Effect.orElse(() => Effect.void))
+
+// ---------------------------------------------------------------------------
 // Main app factory
 // ---------------------------------------------------------------------------
 
@@ -815,11 +863,24 @@ export function makeApp(
 
     switch (method) {
       case "OPTIONS": return handleOptions()
-      case "PUT":     return yield* handleCreate(path, req)
+      case "PUT": {
+        const response = yield* handleCreate(path, req)
+        if (response.status === 201 && !SYSTEM_STREAMS.has(bareStreamName(path))) {
+          const ct = (req.headers["content-type"] as string | undefined) ?? `application/octet-stream`
+          yield* Effect.forkDaemon(writeRegistryInsert(path, ct, Date.now()))
+        }
+        return response
+      }
       case "HEAD":    return yield* handleHead(path)
       case "GET":     return yield* handleRead(path, url, req, config)
       case "POST":    return yield* handleAppend(path, req)
-      case "DELETE":  return yield* handleDelete(path)
+      case "DELETE": {
+        const response = yield* handleDelete(path)
+        if (response.status === 200 && !SYSTEM_STREAMS.has(bareStreamName(path))) {
+          yield* Effect.forkDaemon(writeRegistryDelete(path))
+        }
+        return response
+      }
       default:        return withBaseHeaders(textErr(405, "Method not allowed"))
     }
   })
